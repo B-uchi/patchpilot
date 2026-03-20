@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# example-user-gitlab-ci.yml
+#
+# This is an EXAMPLE showing what a user adds to THEIR project's
+# .gitlab-ci.yml to install PatchPilot.
+#
+# Prerequisites (one-time setup in their project):
+#   1. Settings → CI/CD → Variables → Add variable:
+#        Name:    PATCHPILOT_TOKEN
+#        Value:   (their GitLab Personal Access Token — needs "api" scope)
+#        Masked:  yes
+#        Protected: yes
+#
+#   2. Settings → CI/CD → Variables → Add variable:
+#        Name:    ANTHROPIC_API_KEY
+#        Value:   (their Anthropic API key from console.anthropic.com)
+#        Masked:  yes
+#        Protected: yes
+#
+# That's it. PatchPilot runs automatically after every SAST scan forever.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Pull in GitLab's built-in SAST templates
+include:
+  # GitLab's official SAST template — this is what runs the security scan
+  - template: Security/SAST.gitlab-ci.yml
+
+  # PatchPilot — add this line to get automated fixes
+  - project: 'your-namespace/patchpilot'
+    file: '.gitlab/patchpilot-trigger.yml'
+    ref: main    # pin to a specific tag in production e.g. ref: v1.0.0
+
+stages:
+  - test
+  - .post       # PatchPilot runs here — after everything else
+
+# ── Optional: override PatchPilot defaults ─────────────────────────────────
+# You can override these in your project's variables or right here:
+#
+# variables:
+#   PATCHPILOT_MIN_SEVERITY: "critical"   # only fix critical findings
+#   PATCHPILOT_DRY_RUN: "true"            # test mode — no real MRs opened

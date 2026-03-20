@@ -1,0 +1,246 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .gitlab/patchpilot-trigger.yml
+#
+# WHAT THIS FILE IS:
+#   This is the reusable CI job definition that ANY GitLab project can include
+#   to get PatchPilot working automatically. Users include it with one line:
+#
+#     include:
+#       - project: 'your-namespace/patchpilot'
+#         file: '.gitlab/patchpilot-trigger.yml'
+#
+# HOW PATCHPILOT GETS THE SAST REPORT:
+#   GitLab SAST produces a file called gl-sast-report.json and stores it as
+#   a CI artifact. This job uses `needs:` with `artifacts: true` to download
+#   that artifact automatically before PatchPilot runs. No manual step needed.
+#
+# HOW SECRETS WORK:
+#   Users set these once in their project:
+#   Settings → CI/CD → Variables
+#     - ANTHROPIC_API_KEY   (masked, protected)
+#     - PATCHPILOT_TOKEN    (masked, protected) ← GitLab personal access token
+#   GitLab injects them automatically as environment variables at job runtime.
+#   They never touch the code or this file.
+#
+# STAGES:
+#   This job runs in the `.post` stage — a built-in GitLab stage that always
+#   runs AFTER every other stage in the pipeline, including security/sast.
+#   This guarantees the SAST report exists before PatchPilot reads it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Variables users can override in their own .gitlab-ci.yml ─────────────────
+variables:
+  # Minimum severity PatchPilot will act on.
+  # Override in your project: MIN_SEVERITY: "critical"
+  PATCHPILOT_MIN_SEVERITY:
+    value: "high"
+    description: "Minimum severity to fix: critical | high | medium | low"
+
+  # Set to "true" to see what PatchPilot would do without opening real MRs.
+  PATCHPILOT_DRY_RUN:
+    value: "false"
+    description: "Dry run mode — logs actions without creating branches or MRs"
+
+  # The PatchPilot repo to clone. Override if you fork it.
+  PATCHPILOT_REPO:
+    value: "https://gitlab.com/your-namespace/patchpilot.git"
+    description: "PatchPilot source repo URL"
+
+  # Node version to use
+  PATCHPILOT_NODE_VERSION:
+    value: "20"
+    description: "Node.js version for the runner image"
+
+# ── The PatchPilot job ────────────────────────────────────────────────────────
+patchpilot:
+  stage: .post
+
+  image: node:${PATCHPILOT_NODE_VERSION}-alpine
+
+  # ── When this job runs ──────────────────────────────────────────────────────
+  # Only runs when:
+  #   1. The pipeline was triggered by a push or merge request (not schedules/manual)
+  #   2. A job named "sast" exists and succeeded in this pipeline
+  #   3. We are NOT on a branch that PatchPilot itself created (avoids infinite loops)
+  rules:
+    - if: >
+        $CI_PIPELINE_SOURCE == "push" &&
+        $CI_COMMIT_BRANCH !~ /^patchpilot\// &&
+        $CI_COMMIT_BRANCH !~ /^pp-/
+      when: on_success
+    - if: >
+        $CI_PIPELINE_SOURCE == "merge_request_event" &&
+        $CI_COMMIT_BRANCH !~ /^patchpilot\// &&
+        $CI_COMMIT_BRANCH !~ /^pp-/
+      when: on_success
+    - when: never
+
+  # ── SAST artifact download ──────────────────────────────────────────────────
+  # This is how PatchPilot gets the SAST report — automatically.
+  # `needs` downloads the artifacts from the `sast` job before this job starts.
+  # The gl-sast-report.json file will be available at:
+  #   ./gl-sast-report.json
+  # If your project uses a differently named SAST job, change "sast" below.
+  needs:
+    - job: sast
+      artifacts: true
+      optional: true    # Don't fail if no sast job exists in this pipeline
+
+  # ── Environment variables injected at runtime ───────────────────────────────
+  # ANTHROPIC_API_KEY   → set by user in project CI/CD Variables (masked)
+  # PATCHPILOT_TOKEN    → set by user in project CI/CD Variables (masked)
+  # CI_PROJECT_ID       → GitLab injects this automatically (your project's ID)
+  # CI_SERVER_URL       → GitLab injects this automatically (your GitLab URL)
+  # CI_DEFAULT_BRANCH   → GitLab injects this automatically (e.g. "main")
+  # CI_COMMIT_REF_NAME  → GitLab injects this automatically (current branch)
+  # CI_PIPELINE_ID      → GitLab injects this automatically
+
+  # ── The actual job script ───────────────────────────────────────────────────
+  script:
+    # ── Step 0: Verify required secrets are present ──────────────────────────
+    - |
+      echo "=== PatchPilot starting ==="
+      echo "Pipeline:  $CI_PIPELINE_ID"
+      echo "Project:   $CI_PROJECT_ID"
+      echo "Branch:    $CI_COMMIT_REF_NAME"
+      echo "Min sev:   $PATCHPILOT_MIN_SEVERITY"
+      echo "Dry run:   $PATCHPILOT_DRY_RUN"
+
+    - |
+      if [ -z "$ANTHROPIC_API_KEY" ]; then
+        echo "ERROR: ANTHROPIC_API_KEY is not set."
+        echo "Set it in: Settings → CI/CD → Variables → Add variable"
+        echo "Name: ANTHROPIC_API_KEY | Masked: yes | Protected: yes"
+        exit 1
+      fi
+
+    - |
+      if [ -z "$PATCHPILOT_TOKEN" ]; then
+        echo "ERROR: PATCHPILOT_TOKEN is not set."
+        echo "Create a GitLab Personal Access Token with 'api' scope."
+        echo "Then add it in: Settings → CI/CD → Variables"
+        echo "Name: PATCHPILOT_TOKEN | Masked: yes | Protected: yes"
+        exit 1
+      fi
+
+    # ── Step 1: Find the SAST report ─────────────────────────────────────────
+    # GitLab downloads it via `needs: artifacts: true` above.
+    # It lands at the artifact path — we search for it to be safe.
+    - |
+      SAST_REPORT=""
+
+      # Primary location — where GitLab puts it after artifact download
+      if [ -f "gl-sast-report.json" ]; then
+        SAST_REPORT="gl-sast-report.json"
+        echo "Found SAST report at: gl-sast-report.json"
+
+      # Some GitLab versions put it in a reports/ subdirectory
+      elif [ -f "reports/gl-sast-report.json" ]; then
+        SAST_REPORT="reports/gl-sast-report.json"
+        echo "Found SAST report at: reports/gl-sast-report.json"
+
+      # Search anywhere in the workspace
+      else
+        FOUND=$(find . -name "gl-sast-report.json" -not -path "*/node_modules/*" 2>/dev/null | head -1)
+        if [ -n "$FOUND" ]; then
+          SAST_REPORT="$FOUND"
+          echo "Found SAST report at: $FOUND"
+        fi
+      fi
+
+      # If still not found, try fetching from GitLab API as fallback
+      if [ -z "$SAST_REPORT" ]; then
+        echo "SAST artifact not found in workspace. Attempting API download..."
+        apk add --no-cache curl jq --quiet
+
+        # Try to download the artifact via GitLab API
+        HTTP_STATUS=$(curl -s -o gl-sast-report.json -w "%{http_code}" \
+          --header "PRIVATE-TOKEN: $PATCHPILOT_TOKEN" \
+          "${CI_SERVER_URL}/api/v4/projects/${CI_PROJECT_ID}/jobs/artifacts/${CI_COMMIT_REF_NAME}/raw/gl-sast-report.json?job=sast")
+
+        if [ "$HTTP_STATUS" = "200" ]; then
+          SAST_REPORT="gl-sast-report.json"
+          echo "Downloaded SAST report via API (HTTP $HTTP_STATUS)"
+        else
+          echo "WARNING: Could not download SAST report (HTTP $HTTP_STATUS)"
+          echo "Possible reasons:"
+          echo "  - No SAST job ran in this pipeline"
+          echo "  - SAST job is named something other than 'sast'"
+          echo "  - PATCHPILOT_TOKEN lacks the required permissions"
+          echo ""
+          echo "PatchPilot will exit cleanly — nothing to patch."
+          exit 0
+        fi
+      fi
+
+      # Validate it's real JSON with vulnerabilities
+      if ! cat "$SAST_REPORT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'Vulnerabilities found: {len(d.get(\"vulnerabilities\", []))}')" 2>/dev/null; then
+        echo "WARNING: SAST report exists but appears empty or malformed."
+        echo "PatchPilot will exit cleanly."
+        exit 0
+      fi
+
+      export SAST_REPORT_PATH="$SAST_REPORT"
+
+    # ── Step 2: Install system dependencies ──────────────────────────────────
+    - apk add --no-cache git --quiet
+
+    # ── Step 3: Clone PatchPilot ──────────────────────────────────────────────
+    - |
+      echo "Cloning PatchPilot..."
+      git clone --depth 1 "$PATCHPILOT_REPO" /tmp/patchpilot
+      cd /tmp/patchpilot
+
+    # ── Step 4: Install Node dependencies ────────────────────────────────────
+    - |
+      cd /tmp/patchpilot
+      echo "Installing dependencies..."
+      npm ci --silent
+
+    # ── Step 5: Run PatchPilot ────────────────────────────────────────────────
+    # All config is passed as environment variables — no .env file needed.
+    - |
+      cd /tmp/patchpilot
+
+      # Pass all config as env vars — PatchPilot's config/index.ts reads these
+      export GITLAB_TOKEN="$PATCHPILOT_TOKEN"
+      export GITLAB_PROJECT_ID="$CI_PROJECT_ID"
+      export GITLAB_BASE_URL="$CI_SERVER_URL"
+      export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+      export MIN_SEVERITY="$PATCHPILOT_MIN_SEVERITY"
+      export DRY_RUN="$PATCHPILOT_DRY_RUN"
+      export PATCH_BRANCH_PREFIX="patchpilot/fix"
+
+      # Copy SAST report into PatchPilot's working directory
+      cp "$CI_PROJECT_DIR/$SAST_REPORT_PATH" /tmp/patchpilot/sast-report.json
+
+      echo "=== Running PatchPilot flow ==="
+      npx ts-node flow/index.ts /tmp/patchpilot/sast-report.json
+
+  # ── Artifacts: Save PatchPilot's run log ─────────────────────────────────
+  # This lets you download and inspect what PatchPilot did from the GitLab UI
+  artifacts:
+    name: "patchpilot-run-${CI_PIPELINE_ID}"
+    when: always          # Save even if the job fails — useful for debugging
+    expire_in: 30 days
+    paths:
+      - patchpilot-run-*.json   # If we add JSON output later
+    reports:
+      # No special report type needed — logs are viewable in the GitLab UI
+
+  # ── Resource limits ───────────────────────────────────────────────────────
+  timeout: 30 minutes     # A reasonable upper bound for fixing many findings
+
+  # ── Retry on transient failures ───────────────────────────────────────────
+  # API calls can occasionally fail due to rate limits or network hiccups
+  retry:
+    max: 1
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+  # ── Allow failure ────────────────────────────────────────────────────────
+  # PatchPilot failing should NOT block your pipeline or prevent deployments.
+  # It's a helper, not a gatekeeper.
+  allow_failure: true
+

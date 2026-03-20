@@ -1,0 +1,27 @@
+{
+  "name": "patchpilot",
+  "version": "1.0.0",
+  "description": "Autonomous security vulnerability remediation agent for GitLab",
+  "main": "dist/flow/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node flow/index.ts",
+    "test:local": "ts-node scripts/test-locally.ts",
+    "seed:mock": "ts-node scripts/seed-mock-scan.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}

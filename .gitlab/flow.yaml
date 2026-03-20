@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .gitlab/flow.yaml
+# Defines PatchPilot as a GitLab Duo Flow — a multi-agent pipeline.
+# This is the "conductor" config: Scout → Fixer → Scribe in sequence.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: patchpilot-flow
+display_name: "PatchPilot Security Remediation Flow"
+description: |
+  A three-agent flow that automatically remediates security vulnerabilities:
+  Scout triages findings → Fixer generates and commits fixes → Scribe writes compliance notes.
+
+trigger:
+  event: pipeline_security_scan_complete
+
+steps:
+  - name: scout
+    agent: patchpilot
+    entrypoint: dist/agents/scout/index.js
+    description: "Triage SAST findings — filter noise, rank by severity"
+    outputs:
+      - triaged_findings
+
+  - name: fixer
+    agent: patchpilot
+    entrypoint: dist/agents/fixer/index.js
+    description: "Generate fixes with Claude AI, commit and open MRs"
+    inputs:
+      - triaged_findings
+    outputs:
+      - generated_fixes
+    depends_on: [scout]
+
+  - name: scribe
+    agent: patchpilot
+    entrypoint: dist/agents/scribe/index.js
+    description: "Write compliance audit notes on each MR"
+    inputs:
+      - generated_fixes
+    depends_on: [fixer]

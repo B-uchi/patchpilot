@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .gitlab/agent.yaml
+# Registers PatchPilot as a GitLab Duo custom agent.
+# This tells GitLab: "when a CI pipeline finishes with security findings,
+# wake up PatchPilot and hand it the SAST report."
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: patchpilot
+display_name: "PatchPilot — Autonomous Security Fixer"
+description: |
+  Watches GitLab SAST pipeline results and automatically generates
+  code fixes for security vulnerabilities using Claude AI.
+  Opens Merge Requests with fixes and compliance audit notes.
+version: "1.0.0"
+
+# ── Trigger ──────────────────────────────────────────────────────────────────
+# PatchPilot wakes up when a CI pipeline finishes
+trigger:
+  event: pipeline
+  conditions:
+    - status: success          # Only run when pipeline succeeded
+    - has_artifact: gl-sast-report.json  # Only when there's a SAST report
+
+# ── Tools the agent is allowed to use ────────────────────────────────────────
+tools:
+  - name: read_file            # Read source files to understand context
+  - name: create_branch        # Create fix branches
+  - name: create_merge_request # Open MRs with fixes
+  - name: add_mr_comment       # Post compliance notes
+
+# ── Runtime ──────────────────────────────────────────────────────────────────
+runtime:
+  image: node:20-alpine
+  command: ["node", "dist/flow/index.js"]
+  environment:
+    - GITLAB_TOKEN
+    - GITLAB_PROJECT_ID
+    - ANTHROPIC_API_KEY
+    - MIN_SEVERITY
+    - DRY_RUN
